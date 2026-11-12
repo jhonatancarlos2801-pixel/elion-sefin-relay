@@ -107,7 +107,18 @@ async function atender(p) {
       }
       return { status, qr, erro, eu, contatos };
     }
-    case 'conectar': if (status !== 'conectado') { ligar(); await new Promise(r => setTimeout(r, 2500)); } return { status, qr, erro, eu };
+    case 'conectar': {
+      if (status !== 'conectado') { ligar(); await new Promise(r => setTimeout(r, 2500)); }
+      // conectar sem câmera: código de 8 letras digitado no próprio celular (WhatsApp > Dispositivos conectados > Conectar com número)
+      const num = String(p.numero || '').replace(/\D/g, '');
+      if (num && status !== 'conectado') {
+        for (let i = 0; i < 10 && !(sock && status === 'qr'); i++) await new Promise(r => setTimeout(r, 1000));
+        if (!sock) throw new Error('Conexão ainda não está pronta. Tente de novo.');
+        const codigo = await sock.requestPairingCode(num.startsWith('55') ? num : `55${num}`);
+        return { status, codigo, eu };
+      }
+      return { status, qr, erro, eu };
+    }
     case 'desconectar': {
       try { await sock?.logout(); } catch { /* já caiu */ }
       sock = null; eu = null; qr = null; status = 'desconectado';
