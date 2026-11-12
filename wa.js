@@ -55,7 +55,9 @@ async function ligar() {
       }
       if (u.connection === 'close') {
         const code = u.lastDisconnect?.error?.output?.statusCode;
+        const registrado = !!state.creds?.registered;
         sock = null; eu = null;
+        if (!registrado && code === DisconnectReason.timedOut) { status = 'desconectado'; qr = null; return; } // QR não lido a tempo: para
         if (code === DisconnectReason.loggedOut) { fs.rmSync(PASTA, { recursive: true, force: true }); status = 'desconectado'; qr = null; avisar({ tipo: 'estado', status }); }
         else { status = 'conectando'; setTimeout(() => { ligando = false; ligar(); }, 3000); }
       }
