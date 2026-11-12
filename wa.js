@@ -6,7 +6,7 @@ const fs = require('fs');
 
 const PASTA = process.env.WA_AUTH_DIR || '/tmp/elion-wa-auth';
 let B = null;                 // módulo Baileys (carregado sob demanda: se faltar, o intermediário da Sefin segue funcionando)
-let sock = null, status = 'desconectado', qr = null, erro = null, eu = null, ligando = false;
+let sock = null, status = 'desconectado', qr = null, erro = null, eu = null, ligando = false, religar = null;
 let callback = null;          // { url, token } informado pelo sistema a cada pedido
 let permitidos = new Set();   // números canônicos 55 + DDD + 8 últimos dígitos
 const recentes = [];          // ids já repassados (evita duplicar)
@@ -33,8 +33,12 @@ function textoDe(msg) {
   return x.conversation || x.extendedTextMessage?.text || x.imageMessage?.caption || x.buttonsResponseMessage?.selectedDisplayText || '';
 }
 
+/** Agenda UMA reconexão (nunca duas conexões ao mesmo tempo: a segunda invalida o QR Code da primeira). */
+function agendar(ms) { if (religar) return; religar = setTimeout(() => { religar = null; ligar(); }, ms); }
+const sessaoSalva = () => { try { const c = JSON.parse(fs.readFileSync(`${PASTA}/creds.json`, 'utf8')); return !!(c.registered || c.me); } catch { return false; } };
+
 async function ligar() {
-  if (ligando || status === 'conectado') return;
+  if (sock || ligando) return; // já existe uma conexão (ou está sendo criada): não cria outra
   ligando = true; erro = null;
   try {
     const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion, downloadMediaMessage } = await carregar();
@@ -42,27 +46,31 @@ async function ligar() {
     const { state, saveCreds } = await useMultiFileAuthState(PASTA);
     let version; try { ({ version } = await fetchLatestBaileysVersion()); } catch { version = undefined; }
     status = 'conectando';
-    sock = makeWASocket({ ...(version ? { version } : {}), auth: state, browser: Browsers.macOS('Elion Fiscal'), logger: pino({ level: 'silent' }), markOnlineOnConnect: false, syncFullHistory: false, printQRInTerminal: false });
-    sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', async u => {
+    const este = makeWASocket({ ...(version ? { version } : {}), auth: state, browser: Browsers.macOS('Elion Fiscal'), logger: pino({ level: 'silent' }), markOnlineOnConnect: false, syncFullHistory: false, printQRInTerminal: false });
+    sock = este;
+    este.ev.on('creds.update', saveCreds);
+    este.ev.on('connection.update', async u => {
+      if (este !== sock) return; // evento de uma conexão antiga
       if (u.qr) { qr = u.qr; status = 'qr'; }
       if (u.connection === 'open') {
         status = 'conectado'; qr = null;
-        const id = sock.user?.id; let foto = null;
-        try { foto = await sock.profilePictureUrl(B.jidNormalizedUser(id), 'image'); } catch { foto = null; }
-        eu = { numero: numeroDoJid(id), nome: sock.user?.name || sock.user?.verifiedName || null, foto };
+        const id = este.user?.id; let foto = null;
+        try { foto = await este.profilePictureUrl(B.jidNormalizedUser(id), 'image'); } catch { foto = null; }
+        eu = { numero: numeroDoJid(id), nome: este.user?.name || este.user?.verifiedName || null, foto };
         avisar({ tipo: 'estado', status, eu });
       }
       if (u.connection === 'close') {
         const code = u.lastDisconnect?.error?.output?.statusCode;
-        const registrado = !!state.creds?.registered;
+        const registrado = !!(state.creds?.registered || state.creds?.me);
+        console.log('WhatsApp fechou', code, 'registrado:', registrado);
         sock = null; eu = null;
+        if (code === DisconnectReason.loggedOut) { fs.rmSync(PASTA, { recursive: true, force: true }); status = 'desconectado'; qr = null; avisar({ tipo: 'estado', status }); return; }
+        if (code === DisconnectReason.restartRequired) { status = 'conectando'; qr = null; agendar(500); return; } // normal logo depois de ler o QR
         if (!registrado && code === DisconnectReason.timedOut) { status = 'desconectado'; qr = null; return; } // QR não lido a tempo: para
-        if (code === DisconnectReason.loggedOut) { fs.rmSync(PASTA, { recursive: true, force: true }); status = 'desconectado'; qr = null; avisar({ tipo: 'estado', status }); }
-        else { status = 'conectando'; setTimeout(() => { ligando = false; ligar(); }, 3000); }
+        status = 'conectando'; agendar(3000);
       }
     });
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    este.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
       for (const m of messages) {
         try {
@@ -78,7 +86,7 @@ async function ligar() {
           const x = m.message.ephemeralMessage?.message || m.message;
           const ev = { tipo: 'mensagem', de: numero, jid, waId: m.key.id, nome: m.pushName || null, texto: textoDe(m) };
           if (x.audioMessage || x.imageMessage) {
-            const buf = await downloadMediaMessage(m, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage });
+            const buf = await downloadMediaMessage(m, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: este.updateMediaMessage });
             if (buf.length <= 8_000_000) {
               if (x.audioMessage) { ev.audio = buf.toString('base64'); ev.audioMime = x.audioMessage.mimetype || 'audio/ogg'; }
               else { ev.imagem = buf.toString('base64'); }
@@ -96,8 +104,8 @@ async function ligar() {
 async function atender(p) {
   if (p.cb?.url && p.cb?.token) callback = { url: String(p.cb.url), token: String(p.cb.token) };
   if (Array.isArray(p.permitidos)) permitidos = new Set(p.permitidos.map(canon));
-  // sessão salva em disco e ainda desligada (ex.: serviço reiniciou): religa sozinho
-  if (!sock && !ligando && fs.existsSync(`${PASTA}/creds.json`) && p.acao !== 'desconectar') ligar();
+  // sessão já autenticada e desligada (ex.: serviço reiniciou): religa sozinho — só se não houver religação agendada
+  if (!sock && !ligando && !religar && sessaoSalva() && p.acao !== 'desconectar') ligar();
   switch (p.acao) {
     case 'estado': {
       const contatos = [];
@@ -108,7 +116,7 @@ async function atender(p) {
       return { status, qr, erro, eu, contatos };
     }
     case 'conectar': {
-      if (status !== 'conectado') { ligar(); await new Promise(r => setTimeout(r, 2500)); }
+      if (!sock && !ligando && !religar) { ligar(); await new Promise(r => setTimeout(r, 3000)); }
       // conectar sem câmera: código de 8 letras digitado no próprio celular (WhatsApp > Dispositivos conectados > Conectar com número)
       const num = String(p.numero || '').replace(/\D/g, '');
       if (num && status !== 'conectado') {
@@ -120,8 +128,10 @@ async function atender(p) {
       return { status, qr, erro, eu };
     }
     case 'desconectar': {
-      try { await sock?.logout(); } catch { /* já caiu */ }
-      sock = null; eu = null; qr = null; status = 'desconectado';
+      if (religar) { clearTimeout(religar); religar = null; }
+      const s0 = sock; sock = null;
+      try { await s0?.logout(); } catch { try { s0?.end?.(); } catch { /* já caiu */ } }
+      eu = null; qr = null; status = 'desconectado';
       fs.rmSync(PASTA, { recursive: true, force: true });
       return { status };
     }
