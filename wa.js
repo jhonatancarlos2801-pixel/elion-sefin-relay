@@ -33,6 +33,16 @@ function textoDe(msg) {
   return x.conversation || x.extendedTextMessage?.text || x.imageMessage?.caption || x.buttonsResponseMessage?.selectedDisplayText || '';
 }
 
+/** Cópia da sessão (pasta de autenticação) enviada ao sistema, que guarda cifrada: sobrevive a reinícios do Render. */
+let copiaTimer = null;
+function arquivosSessao() {
+  try { const o = {}; for (const f of fs.readdirSync(PASTA)) if (/^[\w.\-]+$/.test(f)) o[f] = fs.readFileSync(`${PASTA}/${f}`, 'utf8'); return o; } catch { return null; }
+}
+function copiarSessao(ms = 15000) {
+  clearTimeout(copiaTimer);
+  copiaTimer = setTimeout(() => { const a = arquivosSessao(); if (a && a['creds.json']) avisar({ tipo: 'sessao', arquivos: a }); }, ms);
+}
+
 /** Agenda UMA reconexão (nunca duas conexões ao mesmo tempo: a segunda invalida o QR Code da primeira). */
 function agendar(ms) { if (religar) return; religar = setTimeout(() => { religar = null; ligar(); }, ms); }
 const sessaoSalva = () => { try { const c = JSON.parse(fs.readFileSync(`${PASTA}/creds.json`, 'utf8')); return !!(c.registered || c.me); } catch { return false; } };
@@ -48,7 +58,7 @@ async function ligar() {
     status = 'conectando';
     const este = makeWASocket({ ...(version ? { version } : {}), auth: state, browser: Browsers.macOS('Elion Fiscal'), logger: pino({ level: 'silent' }), markOnlineOnConnect: false, syncFullHistory: false, printQRInTerminal: false });
     sock = este;
-    este.ev.on('creds.update', saveCreds);
+    este.ev.on('creds.update', async (...x) => { await saveCreds(...x); copiarSessao(); });
     este.ev.on('connection.update', async u => {
       if (este !== sock) return; // evento de uma conexão antiga
       if (u.qr) { qr = u.qr; status = 'qr'; }
@@ -58,13 +68,14 @@ async function ligar() {
         try { foto = await este.profilePictureUrl(B.jidNormalizedUser(id), 'image'); } catch { foto = null; }
         eu = { numero: numeroDoJid(id), nome: este.user?.name || este.user?.verifiedName || null, foto };
         avisar({ tipo: 'estado', status, eu });
+        copiarSessao(2000);
       }
       if (u.connection === 'close') {
         const code = u.lastDisconnect?.error?.output?.statusCode;
         const registrado = !!(state.creds?.registered || state.creds?.me);
         console.log('WhatsApp fechou', code, 'registrado:', registrado);
         sock = null; eu = null;
-        if (code === DisconnectReason.loggedOut) { fs.rmSync(PASTA, { recursive: true, force: true }); status = 'desconectado'; qr = null; avisar({ tipo: 'estado', status }); return; }
+        if (code === DisconnectReason.loggedOut) { fs.rmSync(PASTA, { recursive: true, force: true }); status = 'desconectado'; qr = null; avisar({ tipo: 'estado', status }); avisar({ tipo: 'sessao', arquivos: null }); return; }
         if (code === DisconnectReason.restartRequired) { status = 'conectando'; qr = null; agendar(500); return; } // normal logo depois de ler o QR
         if (!registrado && code === DisconnectReason.timedOut) { status = 'desconectado'; qr = null; return; } // QR não lido a tempo: para
         status = 'conectando'; agendar(3000);
@@ -113,7 +124,7 @@ async function atender(p) {
         let foto = null; try { foto = await sock.profilePictureUrl(`${n.slice(0, 4)}9${n.slice(4)}@s.whatsapp.net`, 'image'); } catch { try { foto = await sock.profilePictureUrl(`${n}@s.whatsapp.net`, 'image'); } catch { foto = null; } }
         contatos.push({ numero: n, foto });
       }
-      return { status, qr, erro, eu, contatos };
+      return { status, qr, erro, eu, contatos, precisa_sessao: !sock && !ligando && !sessaoSalva() };
     }
     case 'conectar': {
       if (!sock && !ligando && !religar) { ligar(); await new Promise(r => setTimeout(r, 3000)); }
@@ -126,6 +137,15 @@ async function atender(p) {
         return { status, codigo, eu };
       }
       return { status, qr, erro, eu };
+    }
+    case 'restaurar': {
+      if (sock || ligando || sessaoSalva()) return { status };
+      const a = p.arquivos || {};
+      if (!a['creds.json']) throw new Error('Sessão inválida.');
+      fs.mkdirSync(PASTA, { recursive: true });
+      for (const [f, c] of Object.entries(a)) if (/^[\w.\-]+$/.test(f) && typeof c === 'string') fs.writeFileSync(`${PASTA}/${f}`, c);
+      ligar(); await new Promise(r => setTimeout(r, 4000));
+      return { status, eu };
     }
     case 'desconectar': {
       if (religar) { clearTimeout(religar); religar = null; }
