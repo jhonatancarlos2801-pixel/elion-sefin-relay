@@ -112,11 +112,11 @@ async function ligar() {
 }
 
 /** Converte o SVG do comprovante (gerado pelo sistema) em PNG, com as fontes embutidas no projeto. */
-const FONTES = ['Inter_400Regular.ttf', 'Inter_600SemiBold.ttf', 'Inter_700Bold.ttf'].map(f => `${__dirname}/fontes/${f}`);
+const FONTES = ['Manrope_400Regular.ttf', 'Manrope_600SemiBold.ttf', 'Manrope_700Bold.ttf'].map(f => `${__dirname}/fontes/${f}`);
 function svgParaPng(svg) {
   if (!svg.startsWith('<svg') || svg.length > 500_000) throw new Error('Imagem inválida.');
   const { Resvg } = require('@resvg/resvg-js');
-  return new Resvg(svg, { font: { fontFiles: FONTES, loadSystemFonts: false, defaultFontFamily: 'Inter' }, fitTo: { mode: 'original' } }).render().asPng();
+  return new Resvg(svg, { font: { fontFiles: FONTES, loadSystemFonts: false, defaultFontFamily: 'Manrope' }, fitTo: { mode: 'original' } }).render().asPng();
 }
 
 /** Atende um pedido assinado do sistema: { acao, cb, permitidos, ... } */
