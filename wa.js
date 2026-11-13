@@ -111,6 +111,14 @@ async function ligar() {
   ligando = false;
 }
 
+/** Converte o SVG do comprovante (gerado pelo sistema) em PNG, com as fontes embutidas no projeto. */
+const FONTES = ['Inter_400Regular.ttf', 'Inter_600SemiBold.ttf', 'Inter_700Bold.ttf'].map(f => `${__dirname}/fontes/${f}`);
+function svgParaPng(svg) {
+  if (!svg.startsWith('<svg') || svg.length > 500_000) throw new Error('Imagem inválida.');
+  const { Resvg } = require('@resvg/resvg-js');
+  return new Resvg(svg, { font: { fontFiles: FONTES, loadSystemFonts: false, defaultFontFamily: 'Inter' }, fitTo: { mode: 'original' } }).render().asPng();
+}
+
 /** Atende um pedido assinado do sistema: { acao, cb, permitidos, ... } */
 async function atender(p) {
   if (p.cb?.url && p.cb?.token) callback = { url: String(p.cb.url), token: String(p.cb.token) };
@@ -155,7 +163,8 @@ async function atender(p) {
       fs.rmSync(PASTA, { recursive: true, force: true });
       return { status };
     }
-    case 'enviar': {
+    case 'enviar':
+    case 'enviar_imagem': {
       if (!sock || status !== 'conectado') throw new Error('WhatsApp não conectado.');
       const n = String(p.para || '').replace(/\D/g, '');
       if (!permitidos.has(canon(n))) throw new Error('Número fora da lista permitida.');
@@ -165,11 +174,14 @@ async function atender(p) {
         for (const t of tent) { try { const [r] = await sock.onWhatsApp(t); if (r?.exists) { jid = r.jid; break; } } catch { /* próximo */ } }
       }
       if (!jid) throw new Error('Esse número não tem WhatsApp.');
-      const r = await sock.sendMessage(jid, { text: String(p.texto || '').slice(0, 4000) });
+      const msg = p.acao === 'enviar_imagem'
+        ? { image: svgParaPng(String(p.svg || '')), caption: String(p.legenda || '').slice(0, 1000), mimetype: 'image/png' }
+        : { text: String(p.texto || '').slice(0, 4000) };
+      const r = await sock.sendMessage(jid, msg);
       return { ok: true, id: r?.key?.id ?? null };
     }
     default: throw new Error('Ação desconhecida.');
   }
 }
 
-module.exports = { atender };
+module.exports = { atender, svgParaPng };
