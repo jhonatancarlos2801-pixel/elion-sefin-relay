@@ -94,8 +94,16 @@ async function ligar() {
           if (!numero || !permitidos.has(canon(numero))) continue; // fora da lista: ignora em silêncio (nem marca como lido)
           if (recentes.includes(m.key.id)) continue;
           recentes.push(m.key.id); if (recentes.length > 500) recentes.shift();
-          const x = m.message.ephemeralMessage?.message || m.message;
-          const ev = { tipo: 'mensagem', de: numero, jid, waId: m.key.id, nome: m.pushName || null, texto: textoDe(m) };
+          const x0 = m.message.ephemeralMessage?.message || m.message;
+          const x = x0.documentWithCaptionMessage?.message || x0;
+          const ev = { tipo: 'mensagem', de: numero, jid, waId: m.key.id, nome: m.pushName || null, texto: textoDe(m) || x.documentMessage?.caption || '' };
+          // PDF (boleto, conta, Pix): manda o texto do documento para o sistema achar o código e pagar com confirmação
+          if (x.documentMessage && /pdf/i.test(x.documentMessage.mimetype || x.documentMessage.fileName || '')) {
+            try {
+              const buf = await downloadMediaMessage({ ...m, message: x }, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: este.updateMediaMessage });
+              if (buf.length <= 8_000_000) ev.documento = { nome: x.documentMessage.fileName || 'documento.pdf', texto: await textoDoPdf(buf) };
+            } catch (e) { ev.documento = { nome: x.documentMessage.fileName || 'documento.pdf', texto: '', erro: e.message }; }
+          }
           if (x.audioMessage || x.imageMessage) {
             const buf = await downloadMediaMessage(m, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: este.updateMediaMessage });
             if (buf.length <= 8_000_000) {
@@ -109,6 +117,15 @@ async function ligar() {
     });
   } catch (e) { erro = e.message; status = 'erro'; console.error('WhatsApp', e); }
   ligando = false;
+}
+
+/** Texto de um PDF (até 5 páginas), para achar linha digitável de boleto ou Pix copia e cola. */
+async function textoDoPdf(buf) {
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buf), isEvalSupported: false, useSystemFonts: false }).promise;
+  let t = '';
+  for (let i = 1; i <= Math.min(doc.numPages, 5); i++) { const p = await doc.getPage(i); const c = await p.getTextContent(); t += c.items.map(x => x.str + (x.hasEOL ? '\n' : ' ')).join('') + '\n'; }
+  return t.slice(0, 30000);
 }
 
 /** Converte o SVG do comprovante (gerado pelo sistema) em PNG, com as fontes embutidas no projeto. */
